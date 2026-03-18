@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -90,6 +92,8 @@ SYSTEM_PROMPT = """Ти досвідчений проджект-менеджер
 10.2. Обов'язково вкажи суть функції, ключові дії користувача/адміністратора та очікуваний результат.
 10.3. Не спрощуй до коротких формулювань на кшталт "Імпорт товарів" або "Пошук".
 10.4. Зберігай нейтральну ділову лексику та однаковий стиль у всіх пунктах.
+11. Не змінюй формат і стиль еталонного ТЗ. Заповнюй тільки значення з брифу у відповідні поля структури.
+12. Не додавай нових розділів, функцій або пояснень, яких немає у брифі. Якщо даних немає — "уточнити".
 """
 
 
@@ -192,39 +196,52 @@ def auto_fill_pages_count(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(current, str) and current.strip() and current.strip().lower() != "уточнити":
         return payload
 
-    sections = payload.get("site_sections")
-    if not isinstance(sections, list):
-        payload["pages_count"] = "уточнити"
-        return payload
-
-    normalized_sections = []
-    for section in sections:
-        if isinstance(section, str):
-            name = section.strip()
-            if name:
-                normalized_sections.append(name)
-
-    unique_sections: list[str] = []
-    seen: set[str] = set()
-    for section in normalized_sections:
-        key = section.lower()
-        if key not in seen:
-            seen.add(key)
-            unique_sections.append(section)
-
-    count = len(unique_sections)
-    if normalize_ecommerce_flag(payload.get("is_ecommerce")) and not any("каталог" in s.lower() for s in unique_sections):
-        count += 1
-
-    payload["pages_count"] = str(count) if count > 0 else "уточнити"
-    payload["site_sections"] = unique_sections
+    payload["pages_count"] = "уточнити"
     return payload
 
 
 def sanitize_template_fields(payload: dict[str, Any]) -> dict[str, Any]:
+
+    languages = payload.get("languages")
+    if isinstance(languages, list):
+        cleaned_languages: list[str] = []
+        for lang in languages:
+            if not isinstance(lang, str):
+                continue
+            normalized_lang = re.sub(r"\s+", " ", lang).strip(" ,;-")
+            if normalized_lang and not is_placeholder_text(normalized_lang):
+                cleaned_languages.append(normalized_lang)
+        if cleaned_languages:
+            if not any("основ" in item.lower() for item in cleaned_languages):
+                cleaned_languages[0] = f"{cleaned_languages[0]} (основна)"
+        else:
+            cleaned_languages = ["уточнити (основна)"]
+        payload["languages"] = cleaned_languages
+
+    site_sections = payload.get("site_sections")
+    if isinstance(site_sections, list):
+        cleaned_sections: list[str] = []
+        seen_sections: set[str] = set()
+        for section in site_sections:
+            if not isinstance(section, str):
+                continue
+            normalized_section = re.sub(r"\s+", " ", section).strip(" ,;-")
+            if not normalized_section or is_placeholder_text(normalized_section):
+                continue
+            key = normalized_section.lower()
+            if key in seen_sections:
+                continue
+            seen_sections.add(key)
+            cleaned_sections.append(normalized_section)
+        payload["site_sections"] = cleaned_sections
+
     customer_name = payload.get("customer_name")
+    main_products = payload.get("main_products")
     if isinstance(customer_name, str) and customer_name.strip() and not is_placeholder_text(customer_name):
-        payload["main_products"] = customer_name.strip()
+        customer_clean = re.sub(r"\s+", " ", customer_name).strip()
+        payload["customer_name"] = customer_clean
+        if not isinstance(main_products, str) or is_placeholder_text(main_products) or main_products.strip().lower() == customer_clean.lower():
+            payload["main_products"] = f"Розробка інтернет-магазину для компанії {customer_clean}"
 
     if is_placeholder_text(payload.get("domain")):
         payload["domain"] = ""
@@ -267,6 +284,97 @@ def sanitize_template_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+TRACE_STOPWORDS = {
+    "і",
+    "й",
+    "та",
+    "або",
+    "для",
+    "про",
+    "від",
+    "до",
+    "без",
+    "на",
+    "в",
+    "у",
+    "the",
+    "and",
+    "or",
+    "with",
+    "from",
+    "this",
+    "that",
+}
+
+
+def tokenize_for_traceability(text: str) -> set[str]:
+    tokens = re.findall(r"[a-zа-яіїєґ0-9]{3,}", text.lower())
+    return {token for token in tokens if token not in TRACE_STOPWORDS}
+
+
+def is_item_supported_by_brief(item_text: str, material_text: str) -> bool:
+    item_tokens = tokenize_for_traceability(item_text)
+    if not item_tokens:
+        return False
+    material_tokens = tokenize_for_traceability(material_text)
+    if not material_tokens:
+        return False
+    overlap = item_tokens & material_tokens
+    if len(item_tokens) <= 2:
+        return bool(overlap)
+    return len(overlap) >= 2
+
+
+def lock_payload_to_brief(payload: dict[str, Any], material_text: str) -> dict[str, Any]:
+    if not material_text.strip():
+        return payload
+
+    def filter_string_list(key: str) -> None:
+        arr = payload.get(key)
+        if not isinstance(arr, list):
+            return
+        filtered: list[str] = []
+        for item in arr:
+            if not isinstance(item, str):
+                continue
+            if is_placeholder_text(item):
+                filtered.append(item)
+                continue
+            if is_item_supported_by_brief(item, material_text):
+                filtered.append(item)
+        payload[key] = filtered
+
+    def filter_dict_list(key: str, text_fields: tuple[str, ...]) -> None:
+        arr = payload.get(key)
+        if not isinstance(arr, list):
+            return
+        filtered: list[dict[str, Any]] = []
+        for item in arr:
+            if not isinstance(item, dict):
+                continue
+            probe_parts: list[str] = []
+            for field in text_fields:
+                value = item.get(field)
+                if isinstance(value, str) and value.strip() and not is_placeholder_text(value):
+                    probe_parts.append(value.strip())
+            probe_text = " ".join(probe_parts)
+            if not probe_text:
+                filtered.append(item)
+                continue
+            if is_item_supported_by_brief(probe_text, material_text):
+                filtered.append(item)
+        payload[key] = filtered
+
+    filter_string_list("site_sections")
+    filter_string_list("languages")
+    filter_dict_list("user_roles", ("name", "description"))
+    filter_dict_list("admin_functions", ("name", "description"))
+    filter_dict_list("user_functions", ("name", "description"))
+    filter_dict_list("main_page_blocks", ("name", "description", "client_note", "visual_note", "note_for_comp"))
+    filter_dict_list("dynamic_sections", ("title", "description", "note_for_comp"))
+    return payload
+
+
 ADMIN_TOPIC_KEYWORDS = (
     "адмін",
     "адміністра",
@@ -303,14 +411,7 @@ ADMIN_TOPIC_KEYWORDS = (
     "permission",
 )
 
-DEFAULT_USER_SECTIONS = [
-    "Головна",
-    "Про компанію",
-    "Доставка та оплата",
-    "Контакти",
-    "Реєстрація/Вхід",
-    "Особистий кабінет",
-]
+DEFAULT_USER_SECTIONS: list[str] = []
 
 
 def is_admin_topic(text: str) -> bool:
@@ -454,23 +555,12 @@ USER_SECTION_TEMPLATES: list[tuple[list[str], dict[str, Any]]] = [
 
 
 def build_user_section_template(title: str) -> dict[str, Any]:
-    lower = title.lower()
-    for keywords, template in USER_SECTION_TEMPLATES:
-        if any(keyword in lower for keyword in keywords):
-            return {
-                "title": title,
-                "description": template["description"],
-                "note_for_comp": "",
-                "fields": template["fields"],
-            }
+    clean_title = re.sub(r"\s+", " ", title).strip() or "уточнити"
     return {
-        "title": title,
-        "description": "Опис розділу необхідно деталізувати відповідно до погодженого функціоналу та контент-плану.",
+        "title": clean_title,
+        "description": "уточнити",
         "note_for_comp": "",
-        "fields": [
-            {"name": "Контент", "description": "Перелік інформації, яка має бути опублікована у розділі."},
-            {"name": "Функціонал", "description": "Опис дій користувача та реакції системи у межах розділу."},
-        ],
+        "fields": [{"name": "уточнити", "description": "уточнити"}],
     }
 
 
@@ -536,7 +626,7 @@ def repartition_admin_and_user_blocks(payload: dict[str, Any], material_text: st
             unique_admin_by_name[name_key] = {"name": name, "description": description}
 
     unique_admin = list(unique_admin_by_name.values())
-    payload["admin_functions"] = unique_admin or [{"name": "уточнити", "description": "уточнити"}]
+    payload["admin_functions"] = unique_admin
     payload["dynamic_sections"] = kept_sections
     return payload
 
@@ -582,7 +672,7 @@ def enrich_dynamic_sections(payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             candidate_sections.append(title)
 
-    if not candidate_sections:
+    if not candidate_sections and DEFAULT_USER_SECTIONS:
         candidate_sections = DEFAULT_USER_SECTIONS.copy()
 
     final_sections: list[dict[str, Any]] = []
@@ -827,7 +917,7 @@ def admin_semantic_key(name: str, description: str) -> str:
 def enrich_admin_functions(payload: dict[str, Any], material_text: str) -> dict[str, Any]:
     raw = payload.get("admin_functions")
     if not isinstance(raw, list):
-        payload["admin_functions"] = [{"name": "уточнити", "description": "уточнити"}]
+        payload["admin_functions"] = []
         return payload
 
     enriched: list[dict[str, str]] = []
@@ -842,10 +932,10 @@ def enrich_admin_functions(payload: dict[str, Any], material_text: str) -> dict[
         if not name:
             name = "уточнити"
 
-        if has_detailed_tz_description(description):
+        if description and not is_placeholder_text(description):
             final_description = ensure_sentence(description)
         else:
-            final_description = build_admin_description(name, description, material_text)
+            final_description = "уточнити"
 
         enriched.append({"name": name, "description": final_description})
 
@@ -873,81 +963,32 @@ def enrich_admin_functions(payload: dict[str, Any], material_text: str) -> dict[
         if has_specific:
             deduped.pop(key, None)
 
-    payload["admin_functions"] = list(deduped.values()) or [{"name": "уточнити", "description": "уточнити"}]
+    payload["admin_functions"] = list(deduped.values())
     return payload
 
 
 def enrich_main_page_blocks(payload: dict[str, Any]) -> dict[str, Any]:
     blocks = payload.get("main_page_blocks")
     if not isinstance(blocks, list):
-        blocks = []
+        payload["main_page_blocks"] = []
+        return payload
 
-    normalized: list[dict[str, Any]] = [item for item in blocks if isinstance(item, dict)]
-    names = {str(item.get("name", "")).strip().lower() for item in normalized}
-
-    defaults = [
-        {
-            "name": "Перший екран",
-            "description": "Ключова пропозиція компанії, короткий опис спеціалізації та основна цільова дія для користувача.",
-            "client_note": "",
-            "visual_note": "Заголовок, підзаголовок, кнопка дії, фонове зображення або графічний акцент.",
-            "note_for_comp": "Уточнити фінальний текст УТП та CTA.",
-        },
-        {
-            "name": "Категорії товарів",
-            "description": "Огляд основних товарних категорій з переходом у відповідні розділи каталогу.",
-            "client_note": "",
-            "visual_note": "Сітка карток категорій з зображенням, назвою та посиланням.",
-            "note_for_comp": "Уточнити перелік категорій та порядок пріоритету.",
-        },
-        {
-            "name": "Хіти та новинки",
-            "description": "Блок промо-товарів для швидкого ознайомлення з актуальним асортиментом.",
-            "client_note": "",
-            "visual_note": "Карусель або сітка товарів з ціною, кнопкою переходу та короткими характеристиками.",
-            "note_for_comp": "Уточнити джерело відбору товарів (хіти/новинки/акції).",
-        },
-        {
-            "name": "Переваги компанії",
-            "description": "Аргументація цінності бренду для формування довіри та підвищення конверсії.",
-            "client_note": "",
-            "visual_note": "Іконки або інфоблоки з короткими тезами та поясненням.",
-            "note_for_comp": "Уточнити затверджений список переваг.",
-        },
-        {
-            "name": "Оплата, доставка, повернення",
-            "description": "Короткі правила оформлення, оплати, доставки та повернення для покупця.",
-            "client_note": "",
-            "visual_note": "Структуровані картки або акордеон з ключовими умовами.",
-            "note_for_comp": "Уточнити фінальні бізнес-правила для публікації.",
-        },
-        {
-            "name": "Контактний блок",
-            "description": "Контакти компанії та форма звернення для оперативного зв'язку з клієнтом.",
-            "client_note": "",
-            "visual_note": "Телефон, email, месенджери, адреса, кнопки швидкого зв'язку.",
-            "note_for_comp": "Уточнити актуальні контактні дані та відповідального менеджера.",
-        },
-    ]
-
-    if normalized:
-        normalized = [
-            item
-            for item in normalized
-            if not (is_placeholder_text(item.get("name")) and is_placeholder_text(item.get("description")))
-        ]
-        names = {str(item.get("name", "")).strip().lower() for item in normalized}
-
-    for item in defaults:
-        key = item["name"].strip().lower()
-        if key in names:
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in blocks:
+        if not isinstance(item, dict):
             continue
+        name = str(item.get("name", "")).strip()
+        description = str(item.get("description", "")).strip()
+        if is_placeholder_text(name) and is_placeholder_text(description):
+            continue
+        key = name.lower()
+        if key in seen and key:
+            continue
+        seen.add(key)
         normalized.append(item)
-        names.add(key)
-        if len(normalized) >= 6:
-            break
 
-    payload["main_page_blocks"] = normalized if normalized else defaults
+    payload["main_page_blocks"] = normalized
     return payload
 
 
@@ -980,29 +1021,11 @@ def ensure_required_template_blocks(payload: dict[str, Any]) -> dict[str, Any]:
 
     def ensure_list_of_strings(key: str, fallback: str = "уточнити") -> None:
         arr = payload.get(key)
-        if isinstance(arr, list) and arr:
+        if isinstance(arr, list):
             return
-        payload[key] = [fallback]
+        payload[key] = []
 
     ensure_list_of_strings("site_sections")
-    ensure_list_of_dicts("user_roles", {"name": "уточнити", "description": "уточнити"})
-    ensure_list_of_dicts("admin_functions", {"name": "уточнити", "description": "уточнити"})
-    ensure_list_of_dicts("user_functions", {"name": "уточнити", "description": "уточнити"})
-    ensure_list_of_dicts("target_audience_groups", {"name": "уточнити", "description": "уточнити"})
-    ensure_list_of_dicts(
-        "header_blocks",
-        {"title": "уточнити", "description": "уточнити", "subitems": [], "note": ""},
-    )
-    ensure_list_of_dicts(
-        "main_page_blocks",
-        {
-            "name": "уточнити",
-            "description": "уточнити",
-            "client_note": "",
-            "visual_note": "",
-            "note_for_comp": "",
-        },
-    )
 
     ecommerce = normalize_ecommerce_flag(payload.get("is_ecommerce"))
     if ecommerce:
@@ -1038,14 +1061,7 @@ def ensure_required_template_blocks(payload: dict[str, Any]) -> dict[str, Any]:
                     "fields": [{"name": "уточнити", "description": "уточнити"}],
                 }
             )
-        payload["dynamic_sections"] = generated_sections or [
-            {
-                "title": "уточнити",
-                "description": "уточнити",
-                "note_for_comp": "",
-                "fields": [{"name": "уточнити", "description": "уточнити"}],
-            }
-        ]
+        payload["dynamic_sections"] = generated_sections
 
     return payload
 
@@ -1053,6 +1069,7 @@ def ensure_required_template_blocks(payload: dict[str, Any]) -> dict[str, Any]:
 def finalize_payload_for_template(payload: dict[str, Any], material_text: str, schema: dict[str, Any]) -> dict[str, Any]:
     cleaned = prune_payload_lists(payload)
     if isinstance(cleaned, dict):
+        cleaned = lock_payload_to_brief(cleaned, material_text)
         enriched = enrich_from_text(material_text, schema)
         cleaned = merge_missing_from_enriched(cleaned, enriched)
         cleaned = repartition_admin_and_user_blocks(cleaned, material_text)
@@ -1063,6 +1080,84 @@ def finalize_payload_for_template(payload: dict[str, Any], material_text: str, s
         cleaned = enrich_main_page_blocks(cleaned)
         cleaned = sanitize_template_fields(cleaned)
     return cleaned
+
+
+def hard_validate_and_autofix_payload(payload: dict[str, Any], schema: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    fixed = normalize_by_schema(payload, schema)
+    if not isinstance(fixed, dict):
+        return build_default_from_schema(schema), ["payload_normalization_failed"]
+
+    warnings: list[str] = []
+
+    required_string_keys = (
+        "main_products",
+        "customer_name",
+        "site_purpose_description",
+        "palette_description",
+        "background_color",
+        "fonts_info",
+        "block_structure_note",
+        "logo_note",
+        "old_devices_note",
+    )
+    for key in required_string_keys:
+        value = fixed.get(key)
+        if not isinstance(value, str) or not value.strip():
+            fixed[key] = "уточнити"
+            warnings.append(f"autofix:{key}")
+
+    languages = fixed.get("languages")
+    if not isinstance(languages, list) or not languages:
+        fixed["languages"] = ["уточнити (основна)"]
+        warnings.append("autofix:languages")
+    else:
+        has_primary = any(isinstance(lang, str) and "основ" in lang.lower() for lang in languages)
+        if not has_primary and isinstance(languages[0], str):
+            languages[0] = f"{languages[0]} (основна)"
+            fixed["languages"] = languages
+            warnings.append("autofix:languages_primary")
+
+    if not isinstance(fixed.get("site_sections"), list) or not fixed["site_sections"]:
+        fixed["site_sections"] = ["уточнити"]
+        warnings.append("autofix:site_sections")
+
+    list_placeholders: dict[str, dict[str, Any]] = {
+        "user_roles": {"name": "уточнити", "description": "уточнити"},
+        "admin_functions": {"name": "уточнити", "description": "уточнити"},
+        "user_functions": {"name": "уточнити", "description": "уточнити"},
+        "target_audience_groups": {"name": "уточнити", "description": "уточнити"},
+        "header_blocks": {"title": "уточнити", "description": "уточнити", "subitems": [], "note": ""},
+        "main_page_blocks": {
+            "name": "уточнити",
+            "description": "уточнити",
+            "client_note": "",
+            "visual_note": "",
+            "note_for_comp": "",
+        },
+        "dynamic_sections": {
+            "title": "уточнити",
+            "description": "уточнити",
+            "note_for_comp": "",
+            "fields": [{"name": "уточнити", "description": "уточнити"}],
+        },
+    }
+
+    for key, placeholder in list_placeholders.items():
+        arr = fixed.get(key)
+        if not isinstance(arr, list) or not arr:
+            fixed[key] = [json.loads(json.dumps(placeholder, ensure_ascii=False))]
+            warnings.append(f"autofix:{key}")
+
+    # Канонічний порядок ключів за еталонною схемою.
+    ordered: dict[str, Any] = {}
+    for key in schema.keys():
+        if key in fixed:
+            ordered[key] = fixed[key]
+    for key, value in fixed.items():
+        if key not in ordered:
+            ordered[key] = value
+
+    return ordered, warnings
 
 
 def strip_markdown_fence(text: str) -> str:
@@ -1366,6 +1461,65 @@ def highlight_word_in_docx(file_path: Path, word: str = "уточнити") -> N
     docx.save(file_path)
 
 
+def count_pages_via_pdfinfo(pdf_path: Path) -> int | None:
+    pdfinfo_bin = shutil.which("pdfinfo")
+    if not pdfinfo_bin:
+        return None
+    try:
+        result = subprocess.run([pdfinfo_bin, str(pdf_path)], capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"^Pages:\s+(\d+)\s*$", result.stdout, flags=re.MULTILINE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def detect_docx_page_count(docx_path: Path) -> int | None:
+    soffice_bin = shutil.which("soffice")
+    if not soffice_bin:
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="tz_pages_") as tmpdir:
+        out_dir = Path(tmpdir)
+        try:
+            result = subprocess.run(
+                [
+                    soffice_bin,
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(out_dir),
+                    str(docx_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+
+        if result.returncode != 0:
+            return None
+
+        pdf_path = out_dir / f"{docx_path.stem}.pdf"
+        if not pdf_path.exists():
+            candidates = list(out_dir.glob("*.pdf"))
+            if not candidates:
+                return None
+            pdf_path = candidates[0]
+
+        pages = count_pages_via_pdfinfo(pdf_path)
+        if pages is None:
+            return None
+        return pages if pages > 0 else None
+
+
+
+
 def render_docx(payload: dict[str, Any]) -> Path:
     if not DOCX_AVAILABLE:
         raise RuntimeError(
@@ -1437,6 +1591,8 @@ def generate_payload(material_text: str, description_override: str = "") -> tupl
         warnings.append(f"Fallback mode used: {safe_error_message(exc)}")
 
     payload = finalize_payload_for_template(payload, material_text, schema)
+    payload, hard_validation_warnings = hard_validate_and_autofix_payload(payload, schema)
+    warnings.extend(hard_validation_warnings)
     return payload, source, warnings
 
 
@@ -1494,6 +1650,11 @@ def generate_docx() -> Any:
     try:
         payload, source, warnings = generate_payload(material_text, description_override)
         output_path = render_docx(payload)
+        real_pages = detect_docx_page_count(output_path)
+        if real_pages is not None and str(real_pages) != str(payload.get("pages_count", "")).strip():
+            payload["pages_count"] = str(real_pages)
+            output_path.unlink(missing_ok=True)
+            output_path = render_docx(payload)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 

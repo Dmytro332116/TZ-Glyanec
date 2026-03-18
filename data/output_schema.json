@@ -1,0 +1,122 @@
+{
+  "main_products": "string",
+  "pages_count": "string",
+  "domain": "string",
+  "customer_name": "string",
+  "languages": ["string"],
+  "site_sections": ["string"],
+  "user_roles": [
+    {
+      "name": "string",
+      "description": "string"
+    }
+  ],
+  "admin_functions": [
+    {
+      "name": "string",
+      "description": "string"
+    }
+  ],
+  "user_functions": [
+    {
+      "name": "string",
+      "description": "string"
+    }
+  ],
+  "palette_description": "string",
+  "background_color": "string",
+  "fonts_info": "string",
+  "block_structure_note": "string",
+  "logo_note": "string",
+  "old_devices_note": "string",
+  "liked_sites_list": ["string"],
+  "competitors_list": ["string"],
+  "site_purpose_description": "string",
+  "target_audience_groups": [
+    {
+      "name": "string",
+      "description": "string"
+    }
+  ],
+  "header_blocks": [
+    {
+      "title": "string",
+      "description": "string",
+      "subitems": ["string"],
+      "note": "string"
+    }
+  ],
+  "footer_phone_list": ["string"],
+  "footer_messengers_list": ["string"],
+  "email": "string",
+  "schedule": "string",
+  "footer_address": "string",
+  "footer_address_note": "string",
+  "footer_payment_info": ["string"],
+  "footer_payment_note": "string",
+  "footer_notes": "string",
+  "main_page_blocks": [
+    {
+      "name": "string",
+      "description": "string",
+      "client_note": "string",
+      "visual_note": "string",
+      "note_for_comp": "string"
+    }
+  ],
+  "is_ecommerce": "boolean_or_string",
+  "filters": [
+    {
+      "name": "string"
+    }
+  ],
+  "sorting": [
+    {
+      "name": "string"
+    }
+  ],
+  "notes": ["string"],
+  "product_view_type": "string",
+  "product_card_elements": [
+    {
+      "name": "string",
+      "description": "string"
+    }
+  ],
+  "product_card_structure": [
+    {
+      "name": "string",
+      "description": "string"
+    }
+  ],
+  "product_card_note": "string",
+  "product_admin_fields": [
+    {
+      "name": "string",
+      "description": "string",
+      "subfields": [
+        {
+          "name": "string",
+          "description": "string"
+        }
+      ]
+    }
+  ],
+  "cart_columns": ["string"],
+  "checkout_registered_fields": ["string"],
+  "checkout_guest_fields": ["string"],
+  "checkout_tech_note": "string",
+  "dynamic_sections": [
+    {
+      "title": "string",
+      "description": "string",
+      "note_for_comp": "string",
+      "fields": [
+        {
+          "name": "string",
+          "description": "string"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TZ Builder AI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="bg-shape bg-shape-one"></div>
+    <div class="bg-shape bg-shape-two"></div>
+
+    <main class="layout">
+      <section class="panel panel-input animate-in">
+        <div class="panel-head">
+          <p class="eyebrow">AI Technical Scope</p>
+          <h1>Генератор ТЗ по брифу</h1>
+          <p class="subtitle">
+            Система завжди формує готовий документ ТЗ у форматі DOCX за вашим шаблоном.
+            JSON і Markdown не виводяться у фінальному інтерфейсі.
+          </p>
+        </div>
+
+        <form id="generator-form" class="form-grid">
+          <label class="field">
+            <span>Текст брифу</span>
+            <textarea id="input-text" name="input_text" rows="14" placeholder="Вставте текст, таблицю, нотатки або опис вимог..."></textarea>
+          </label>
+
+          <label class="field">
+            <span>Файл з брифом (опційно)</span>
+            <input id="brief-file" name="brief_file" type="file" />
+          </label>
+
+          <label class="field">
+            <span>description_merged.json (опційно, для перевизначення)</span>
+            <input id="description-file" name="description_file" type="file" accept="application/json,.json" />
+          </label>
+
+          <div class="actions">
+            <button id="submit-btn" type="submit">Сформувати ТЗ (.docx)</button>
+            <button id="clear-btn" type="button" class="ghost">Очистити</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel panel-output animate-in delay-1">
+        <div class="panel-head output-head">
+          <h2>Статус генерації</h2>
+          <p id="source-chip" class="chip">Режим: очікування</p>
+        </div>
+
+        <div id="status" class="status">Готово до обробки.</div>
+        <div id="warnings" class="warnings"></div>
+
+        <div class="doc-hint">
+          Після натискання кнопки система сформує документ і автоматично завантажить файл ТЗ.
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
